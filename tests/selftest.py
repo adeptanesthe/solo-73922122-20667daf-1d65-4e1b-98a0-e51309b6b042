@@ -249,6 +249,212 @@ def main():
     html = client.get("/").text
     check("页面含迟到结果丢弃逻辑", "my !== epoch" in html and "abort" in html)
 
+    print("== 9. 容差核查 ==")
+    from app.tolerance import (
+        TOL_FAIL,
+        TOL_PASS,
+        TOL_PENDING,
+        ToleranceInput,
+        tolerance_check,
+        tolerance_ranges,
+        count_feasible,
+    )
+    import app.tolerance as tmod
+
+    def brute_tolerance_worst(inp_t: ToleranceInput):
+        """对整个容差可行域做 sklearn 暴力枚举，返回 (最差配方, 最低概率, 点数)。
+
+        锁定项区间在 tolerance_ranges 中已退化为单点，枚举天然尊重锁定。
+        """
+        ranges = tolerance_ranges(inp_t)
+        pts = []
+        (l0, h0), (l1, h1), (l2, h2), (l3, h3) = ranges
+        for g0 in range(l0, h0 + 1):
+            for g1 in range(l1, h1 + 1):
+                for g2 in range(l2, h2 + 1):
+                    g3 = TOTAL_GRAMS - g0 - g1 - g2
+                    if l3 <= g3 <= h3:
+                        pts.append((g0, g1, g2, g3))
+        if not pts:
+            return None, None, 0
+        probs = []
+        for s in range(0, len(pts), 2_000_000):
+            arr = np.array(pts[s:s + 2_000_000], dtype=np.float32) / TOTAL_GRAMS
+            probs.append(clf.predict_proba(arr)[:, 1])
+        p = np.concatenate(probs)
+        min_p = float(p.min())
+        # 1e-12 容差吸收分批 predict_proba 的求和顺序尾数差异（森林概率最小间隔约 1e-4）
+        worst_set = [list(pts[k]) for k in range(len(pts)) if abs(float(p[k]) - min_p) <= 1e-12]
+        return worst_set, min_p, len(pts)
+
+    # 9.1 放行样例：z3 结论 pass，且与全域枚举最低点一致
+    tp = samples["tolerance_pass"]
+    inp_tp = ToleranceInput(tp["base"], tp["tolerance"], tp["locked"])
+    res_tp = tolerance_check(forest, clf, inp_tp)
+    check("放行样例核查为 pass", res_tp.status == TOL_PASS, res_tp.reason)
+    check("放行样例最差概率 ≥ 0.7（原分类器复算）",
+          res_tp.min_probability is not None and is_qualified(res_tp.min_probability),
+          f"p={res_tp.min_probability:.6f}")
+    check("最差配方在容差域内且总重 1000",
+          sum(res_tp.worst) == TOTAL_GRAMS and all(
+              tolerance_ranges(inp_tp)[i][0] <= res_tp.worst[i] <= tolerance_ranges(inp_tp)[i][1]
+              for i in range(4)))
+    check("锁定项在最差配方中保持基准用量",
+          all(res_tp.worst[i] == tp["base"][i] for i in range(4) if tp["locked"][i]))
+    bw, bp, bn = brute_tolerance_worst(inp_tp)
+    check("放行样例行数统计与枚举点数一致（含锁定单点）", res_tp.region_size == bn,
+          f"dp={res_tp.region_size}, brute={bn}")
+    check("放行样例 z3 最低概率 == 全域枚举最低概率，且配方在并列最低点集合中",
+          abs(res_tp.min_probability - bp) <= 1e-12 and res_tp.worst in bw,
+          f"z3={res_tp.worst}@{res_tp.min_probability:.6f} brute_min={bp:.6f} ties={len(bw)}")
+
+    # 9.2 不合格反例样例：fail，反例概率 < 0.7，且为枚举最低点
+    tf = samples["tolerance_fail"]
+    inp_tf = ToleranceInput(tf["base"], tf["tolerance"], tf["locked"])
+    res_tf = tolerance_check(forest, clf, inp_tf)
+    check("反例样例核查为 fail", res_tf.status == TOL_FAIL, res_tf.reason)
+    check("反例概率 < 0.7（原分类器复算）",
+          res_tf.min_probability is not None and not is_qualified(res_tf.min_probability),
+          f"p={res_tf.min_probability:.6f}")
+    bw2, bp2, bn2 = brute_tolerance_worst(inp_tf)
+    check("反例样例 z3 最低点 == 全域枚举最低概率（并列集合成员）",
+          abs(res_tf.min_probability - bp2) <= 1e-12 and res_tf.worst in bw2,
+          f"z3={res_tf.worst}@{res_tf.min_probability:.6f} brute_min={bp2:.6f} ties={len(bw2)}")
+    check("反例样例行数统计与枚举点数一致", res_tf.region_size == bn2)
+
+    # 9.3 精确有理概率与 sklearn 复算一致
+    rat = forest_proba_rational(forest, res_tf.worst)
+    check("最差配方精确有理概率与返回值一致",
+          res_tf.rational_min == [rat.numerator, rat.denominator])
+    check("有理概率与 sklearn float64 复算一致", abs(float(rat) - res_tf.min_probability) <= 1e-12)
+
+    # 9.4 小容差（域小）专项：手工可核对的枚举复核
+    inp_small = ToleranceInput([500, 250, 150, 100], [5, 5, 5, 5], [False] * 4)
+    res_small = tolerance_check(forest, clf, inp_small)
+    bw3, bp3, bn3 = brute_tolerance_worst(inp_small)
+    check("小容差域最低点与枚举一致（并列集合成员）",
+          res_small.worst in bw3 and abs(res_small.min_probability - bp3) <= 1e-12
+          and res_small.region_size == bn3,
+          f"{res_small.worst}@{res_small.min_probability:.6f} vs min {bp3:.6f} n={bn3}")
+
+    # 9.5 边界：全锁定 → 域内唯一配方（基准自身）
+    inp_lock = ToleranceInput([700, 100, 100, 100], [99] * 4, [True] * 4)
+    res_lock = tolerance_check(forest, clf, inp_lock)
+    check("全锁定 → 域内唯一配方且结论可判定", res_lock.status == TOL_PASS
+          and res_lock.worst == [700, 100, 100, 100] and res_lock.region_size == 1)
+    inp_lock_bad = ToleranceInput([150, 130, 620, 100], [99] * 4, [True] * 4)
+    res_lock_bad = tolerance_check(forest, clf, inp_lock_bad)
+    check("全锁定在不合格配方上 → fail", res_lock_bad.status == TOL_FAIL
+          and res_lock_bad.region_size == 1)
+
+    # 9.6 非法输入
+    bad_tol = [
+        ToleranceInput([250, 250, 350, 149], [10] * 4, [False] * 4),   # 总重 999
+        ToleranceInput([250, 250, 350, 150], [-1, 0, 0, 0], [False] * 4),  # 负偏差
+        ToleranceInput([250, 250, 350, 150.0], [10] * 4, [False] * 4),  # 非整数克数
+        ToleranceInput([250, 250, 350, 150], [10] * 4, [True, "x", False, False]),  # 非布尔锁定
+    ]
+    check("容差非法输入均判 invalid",
+          all(tolerance_check(forest, clf, c).status == INVALID for c in bad_tol))
+    # 不变式：基准总重 1000 + 对称偏差闭区间 + 非负 ⇒ 基准自身恒在容差域内，域恒非空。
+    # 以 5000 组随机合法输入核对 DP 计数恒 ≥ 1，并与暴力枚举逐例一致。
+    import random
+    rng_t = random.Random(1)
+    invariant_ok, fuzz_dp_ok = True, True
+    for _ in range(5000):
+        rem = TOTAL_GRAMS
+        base_f = []
+        for _i in range(3):
+            v = rng_t.randint(0, rem)
+            base_f.append(v)
+            rem -= v
+        base_f.append(rem)
+        tol_f = [rng_t.randint(0, 50) for _ in range(4)]
+        lk_f = [rng_t.random() < 0.5 for _ in range(4)]
+        cf = ToleranceInput(base_f, tol_f, lk_f)
+        rf = tolerance_ranges(cf)
+        n_dp = count_feasible(rf)
+        if n_dp < 1:
+            invariant_ok = False
+        # 小域才暴力，避免 5000 次三重循环过慢
+        if all(h - lo <= 12 for lo, h in rf):
+            _, _, n_br = brute_tolerance_worst(cf)
+            if n_dp != n_br:
+                fuzz_dp_ok = False
+    check("合法输入容差域恒非空（5000 组随机）", invariant_ok)
+    check("随机小域 DP 计数与暴力枚举一致", fuzz_dp_ok)
+
+    # 9.7 待判路径：注入 unknown / 界不紧 / 异常，均不得给出 pass/fail
+    orig_tb = tmod._build_tolerance_optimize
+
+    class _FakeOpt:
+        def set(self, *a, **k): pass
+        def check(self): return z3.unknown
+        def minimize(self, e): return "h"
+        def lower(self, h): return z3.RealVal(1)
+        def upper(self, h): return z3.RealVal(2)
+        def model(self): return None
+
+    def fake_unknown(f, i):
+        return _FakeOpt(), z3.IntVector("gx", 4), "h", tolerance_ranges(i)
+    tmod._build_tolerance_optimize = fake_unknown
+    check("unknown → 待判（非 pass/fail）", tolerance_check(forest, clf, inp_tf).status == TOL_PENDING)
+
+    class _FakeLoose(_FakeOpt):
+        def check(self): return z3.sat
+    tmod._build_tolerance_optimize = lambda f, i: (
+        _FakeLoose(), z3.IntVector("gy", 4), "h", tolerance_ranges(i))
+    check("sat 但界不紧 → 待判", tolerance_check(forest, clf, inp_tf).status == TOL_PENDING)
+
+    def fake_boom(f, i):
+        raise z3.Z3Exception("injected")
+    tmod._build_tolerance_optimize = fake_boom
+    check("求解器异常 → 待判", tolerance_check(forest, clf, inp_tf).status == TOL_PENDING)
+    tmod._build_tolerance_optimize = orig_tb
+    check("注入恢复后结论正常", tolerance_check(forest, clf, inp_tf).status == TOL_FAIL)
+
+    # 9.8 API：/api/tolerance 四个状态分支
+    r = client.post("/api/tolerance", json={"base": tp["base"], "tolerance": tp["tolerance"],
+                                            "locked": tp["locked"]})
+    rj = r.json()
+    check("POST /api/tolerance 放行分支", r.status_code == 200 and rj["status"] == "pass"
+          and rj["min_probability"] >= 0.7 and rj["worst"] is not None
+          and abs(rj["min_probability"] - res_tp.min_probability) <= 1e-12)
+    # 并列最优点时 z3 返回的具体配方可能不同，但返回配方必须在容差域内且复算概率一致
+    check("API 放行配方在容差域内且复算达标",
+          sum(rj["worst"]) == TOTAL_GRAMS
+          and all(tolerance_ranges(inp_tp)[i][0] <= rj["worst"][i] <= tolerance_ranges(inp_tp)[i][1]
+                  for i in range(4))
+          and abs(predict_proba_qualified(clf, rj["worst"]) - rj["min_probability"]) <= 1e-12)
+    r = client.post("/api/tolerance", json={"base": tf["base"], "tolerance": tf["tolerance"],
+                                            "locked": tf["locked"]})
+    check("POST /api/tolerance 不合格分支", r.json()["status"] == "fail"
+          and r.json()["min_probability"] < 0.7)
+    r = client.post("/api/tolerance", json={"base": [1, 2, 3, 4], "tolerance": [5] * 4,
+                                            "locked": [False] * 4})
+    check("POST /api/tolerance 非法输入分支", r.json()["status"] == "invalid")
+    html2 = client.get("/").text
+    check("页面含容差核查与独立撤回逻辑", "toleranceCheck" in html2 and "tolEpoch" in html2
+          and "/api/tolerance" in html2 and "my !== tolEpoch" in html2)
+
+    # 9.9 并发回归：z3 非线程安全，服务端以 SOLVER_LOCK 串行化；
+    # 线程池并发求解必须全部成功且结果一致（无锁时 z3 会进程级崩溃）
+    import concurrent.futures
+
+    def _post_tol(_):
+        r = client.post("/api/tolerance", json={
+            "base": tf["base"], "tolerance": tf["tolerance"], "locked": tf["locked"]})
+        return r.status_code, r.json()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        outs = list(ex.map(_post_tol, range(8)))
+    check("8 路并发容差核查全部 200 且结论一致",
+          all(code == 200 for code, _ in outs)
+          and len({d["status"] for _, d in outs}) == 1
+          and outs[0][1]["status"] == TOL_FAIL
+          and all(abs(d["min_probability"] - res_tf.min_probability) <= 1e-12 for _, d in outs),
+          f"statuses={[c for c, _ in outs]}")
+
     print()
     if failures:
         print(f"共 {len(failures)} 项失败：{failures}")

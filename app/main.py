@@ -2,9 +2,14 @@
 
 启动时以固定种子训练随机森林（5 棵树、深度 ≤ 3），并预生成经求解器
 实测的可行 / 无解样例。求解结果一律用原分类器复算概率后返回。
+
+z3-solver 的底层 C++ 运行时不是线程安全的：FastAPI 会把本模块的同步
+端点放进线程池并发执行，并发 z3 调用会导致进程级崩溃，因此所有进入
+z3 的求解路径统一经 SOLVER_LOCK 串行化（锁内仅做纯计算，不做 IO 等待）。
 """
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -25,6 +30,7 @@ from .model import (
 )
 from .samples import build_samples
 from .solver import SolveInput, solve
+from .tolerance import ToleranceInput, tolerance_check
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -37,6 +43,9 @@ CLF = train_model()
 FOREST = extract_forest(CLF)
 SAMPLES = build_samples(FOREST, CLF)
 TRAIN_SECONDS = time.perf_counter() - _t0
+
+# z3 非线程安全，所有求解路径串行化（样例在启动期单线程构建，无需持锁）。
+SOLVER_LOCK = threading.Lock()
 
 
 def _depth(tree, nid: int) -> int:
@@ -62,35 +71,48 @@ def meta() -> dict:
 
 @app.post("/api/solve")
 def api_solve(payload: dict) -> dict:
-    def _int_list(key):
-        v = payload.get(key)
-        return list(v) if isinstance(v, (list, tuple)) else []
-
-    def _bool_list(key):
-        v = payload.get(key)
-        return [bool(x) for x in v] if isinstance(v, (list, tuple)) else []
-
-    def _as_ints(key):
-        out = []
-        for x in _int_list(key):
-            if isinstance(x, bool):
-                out.append(x)  # 校验阶段会拒绝
-            elif isinstance(x, int):
-                out.append(x)
-            elif isinstance(x, float) and x.is_integer():
-                out.append(int(x))
-            else:
-                out.append(x)  # 原样传入，由 validate 报错
-        return out
-
     inp = SolveInput(
-        original=_as_ints("original"),
-        lower=_as_ints("lower"),
-        upper=_as_ints("upper"),
-        locked=_bool_list("locked"),
+        original=_as_ints(payload, "original"),
+        lower=_as_ints(payload, "lower"),
+        upper=_as_ints(payload, "upper"),
+        locked=_as_bools(payload, "locked"),
     )
-    result = solve(FOREST, CLF, inp)
+    with SOLVER_LOCK:
+        result = solve(FOREST, CLF, inp)
     return result.to_dict()
+
+
+@app.post("/api/tolerance")
+def api_tolerance(payload: dict) -> dict:
+    inp = ToleranceInput(
+        base=_as_ints(payload, "base"),
+        tolerance=_as_ints(payload, "tolerance"),
+        locked=_as_bools(payload, "locked"),
+    )
+    with SOLVER_LOCK:
+        result = tolerance_check(FOREST, CLF, inp)
+    return result.to_dict()
+
+
+def _as_ints(payload: dict, key: str) -> list:
+    v = payload.get(key)
+    raw = list(v) if isinstance(v, (list, tuple)) else []
+    out = []
+    for x in raw:
+        if isinstance(x, bool):
+            out.append(x)  # 校验阶段会拒绝
+        elif isinstance(x, int):
+            out.append(x)
+        elif isinstance(x, float) and x.is_integer():
+            out.append(int(x))
+        else:
+            out.append(x)  # 原样传入，由 validate 报错
+    return out
+
+
+def _as_bools(payload: dict, key: str) -> list[bool]:
+    v = payload.get(key)
+    return [bool(x) for x in v] if isinstance(v, (list, tuple)) else []
 
 
 @app.get("/api/samples")

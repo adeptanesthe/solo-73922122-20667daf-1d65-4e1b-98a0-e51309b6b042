@@ -44,6 +44,21 @@
   .locked-tag { color:var(--muted); font-size:12px; }
   .note { font-size:12.5px; color:var(--muted); margin-top:8px; line-height:1.6; }
   code { background:#eef1f4; padding:1px 5px; border-radius:4px; }
+  /* 标签页 */
+  .tabs { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
+  .tab { padding:9px 20px; border-radius:8px; border:1px solid var(--line); background:#fff; color:var(--ink);
+         font-size:14px; cursor:pointer; }
+  .tab.active { background:#0b3d2e; border-color:#0b3d2e; color:#fff; font-weight:600; }
+  .view { display:none; }
+  .view.active { display:block; }
+  .panel.pass { display:block; background:#eefaf1; border:1px solid #bfe6c9; }
+  .panel.pass h3 { color:var(--ok); }
+  .panel.pending { display:block; background:#eef2f8; border:1px solid #c3d2e4; }
+  .panel.pending h3 { color:#2b5a93; }
+  .verdict-badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12.5px; font-weight:600; }
+  .verdict-badge.pass { background:#d7f0df; color:var(--ok); }
+  .verdict-badge.fail { background:#f8d7d2; color:var(--bad); }
+  .verdict-badge.pending { background:#dde7f3; color:#2b5a93; }
 </style>
 </head>
 <body>
@@ -52,6 +67,12 @@
   <p id="metaLine">质检模型加载中…</p>
 </header>
 <main>
+  <div class="tabs">
+    <button class="tab active" id="tabSolve" type="button">试配求解</button>
+    <button class="tab" id="tabTol" type="button">容差核查（投产放行）</button>
+  </div>
+
+  <div class="view active" id="viewSolve">
   <section>
     <h2>1. 原配方与各原料限制（总重须为 1000 克）</h2>
     <table id="grid">
@@ -96,6 +117,66 @@
       <div class="kv" id="invalidReason"></div>
     </div>
   </section>
+  </div><!-- /viewSolve -->
+
+  <div class="view" id="viewTol">
+  <section>
+    <h2>1. 基准配方与称量允许偏差（总重须为 1000 克）</h2>
+    <table id="tolGrid">
+      <thead>
+        <tr><th>原料</th><th>基准配方（克）</th><th>允许偏差 ±（克）</th><th>锁定用量</th><th>实际允许区间（克）</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="sumline" id="tolSumLine"></div>
+    <div class="btns">
+      <button id="tolBtn" type="button">开始容差核查</button>
+      <button class="ghost" id="tolPassBtn" type="button">载入放行样例</button>
+      <button class="ghost" id="tolFailBtn" type="button">载入不合格反例样例</button>
+    </div>
+    <div class="note">
+      在「基准配方 ± 允许偏差」形成的全部整数克配方中（仍须总重 1000 克、用量非负，锁定项保持基准用量），
+      按现有随机森林的 <b>float32 推理语义</b>求<b>最低合格概率</b>及对应配方，并用原分类器复算。
+      最差概率经证明 ≥ 0.7 才显示<b>可放行</b>；已证实低于阈值时显示<b>不合格反例</b>；
+      求解未能判定则保持<b>待判</b>。任何输入修改都会立即撤下结论，迟到的旧响应不会恢复。
+    </div>
+  </section>
+
+  <section>
+    <h2>2. 容差核查结论</h2>
+    <div id="tolStatus">尚未核查。</div>
+    <div class="panel pass" id="panelTolPass">
+      <h3><span class="verdict-badge pass">可放行</span>　最差情形仍合格</h3>
+      <div class="kv">容差域内最低合格概率：<b id="tolPassMin"></b>（阈值 0.7，含原分类器复算）</div>
+      <div class="kv">基准配方概率：<b id="tolPassBase"></b>　域内可行配方数：<b id="tolPassSize"></b> 个　耗时：<span id="tolPassMs"></span> ms</div>
+      <table style="margin-top:8px">
+        <thead><tr><th>原料</th><th>基准用量</th><th>最差配方用量</th><th>变化</th><th>允许区间</th></tr></thead>
+        <tbody id="tolPassRows"></tbody>
+      </table>
+      <div class="kv" style="margin-top:8px">结论依据：<b id="tolPassOpt"></b></div>
+    </div>
+    <div class="panel infeasible" id="panelTolFail">
+      <h3><span class="verdict-badge fail">不可放行</span>　已证实不合格反例</h3>
+      <div class="kv" id="tolFailReason"></div>
+      <div class="kv">反例（最差配方）合格概率：<b id="tolFailMin"></b>（&lt; 0.7，原分类器复算）　基准配方概率：<b id="tolFailBase"></b></div>
+      <div class="kv">域内可行配方数：<b id="tolFailSize"></b> 个　耗时：<span id="tolFailMs"></span> ms</div>
+      <table style="margin-top:8px">
+        <thead><tr><th>原料</th><th>基准用量</th><th>反例用量</th><th>变化</th><th>允许区间</th></tr></thead>
+        <tbody id="tolFailRows"></tbody>
+      </table>
+      <div class="kv" style="margin-top:8px">结论依据：<b id="tolFailOpt"></b></div>
+    </div>
+    <div class="panel pending" id="panelTolPending">
+      <h3><span class="verdict-badge pending">待判</span>　求解未能判定</h3>
+      <div class="kv" id="tolPendingReason"></div>
+      <div class="kv">在取得严格证明前，不得据此放行或拒收。</div>
+    </div>
+    <div class="panel invalid" id="panelTolInvalid">
+      <h3>输入不合法</h3>
+      <div class="kv" id="tolInvalidReason"></div>
+    </div>
+  </section>
+  </div><!-- /viewTol -->
 </main>
 
 <script>
@@ -106,8 +187,11 @@ let samples = null;
 // ---- 结果撤回机制：epoch + AbortController ----
 // 任何输入修改都会令 epoch 递增、中止在途请求并立即清空旧建议；
 // 迟到的响应若 epoch 已过期则直接丢弃，绝不恢复旧建议。
+// 试配求解与容差核查各自维护独立 epoch，互不干扰。
 let epoch = 0;
 let inflight = null;
+let tolEpoch = 0;
+let tolInflight = null;
 
 const $ = id => document.getElementById(id);
 
@@ -240,8 +324,168 @@ function renderResult(d) {
   }
 }
 
+// ================= 容差核查（与试配求解相互独立） =================
+function buildTolGrid() {
+  const tbody = document.querySelector("#tolGrid tbody");
+  tbody.innerHTML = "";
+  for (let i = 0; i < 4; i++) {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${featureNames[i]}</td>` +
+      `<td><input type="number" id="tbase${i}" min="0" max="${TOTAL}" step="1"></td>` +
+      `<td><input type="number" id="ttol${i}" min="0" max="${TOTAL}" step="1" value="10"></td>` +
+      `<td><input type="checkbox" id="tlock${i}"></td>` +
+      `<td class="locked-tag" id="trange${i}">—</td>`;
+    tbody.appendChild(tr);
+  }
+  if (!tbody.dataset.bound) {
+    tbody.dataset.bound = "1";
+    tbody.addEventListener("input", onTolEdit);
+    tbody.addEventListener("change", onTolEdit);
+  }
+  updateTolRanges();
+}
+
+function readTolForm() {
+  const num = id => { const s = $(id).value.trim(); const v = s === "" ? NaN : Number(s); return Number.isInteger(v) ? v : NaN; };
+  return {
+    base:      [0,1,2,3].map(i => num("tbase" + i)),
+    tolerance: [0,1,2,3].map(i => num("ttol" + i)),
+    locked:    [0,1,2,3].map(i => $("tlock" + i).checked),
+  };
+}
+
+function fillTolForm(s) {
+  for (let i = 0; i < 4; i++) {
+    $("tbase" + i).value = s.base[i];
+    $("ttol" + i).value = s.tolerance[i];
+    $("tlock" + i).checked = s.locked[i];
+  }
+  onTolEdit();
+}
+
+function updateTolRanges() {
+  const f = readTolForm();
+  for (let i = 0; i < 4; i++) {
+    const b = f.base[i], t = f.tolerance[i];
+    const el = $("trange" + i);
+    if (f.locked[i]) { el.textContent = b + "（锁定）"; continue; }
+    if (!Number.isInteger(b) || !Number.isInteger(t)) { el.textContent = "—"; continue; }
+    const lo = Math.max(0, b - t), hi = Math.min(TOTAL, b + t);
+    el.textContent = `[${lo}, ${hi}]`;
+  }
+}
+
+function onTolEdit() {
+  tolEpoch++;                          // 在途与迟到结果立即失效
+  if (tolInflight) { tolInflight.abort(); tolInflight = null; }
+  $("tolBtn").disabled = false;
+  hideTolPanels();
+  $("tolStatus").textContent = "输入已修改，旧结论已撤下。请重新核查。";
+  updateTolRanges();
+  // 基准总重即时校验提示（不阻塞请求，后端另有完整校验）
+  let sum = 0, bad = false;
+  for (let i = 0; i < 4; i++) {
+    const el = $("tbase" + i);
+    const v = el.value.trim() === "" ? NaN : Number(el.value);
+    if (!Number.isInteger(v) || v < 0 || v > TOTAL) { bad = true; el.classList.add("invalid"); }
+    else { el.classList.remove("invalid"); sum += v; }
+    const te = $("ttol" + i);
+    const tv = te.value.trim() === "" ? NaN : Number(te.value);
+    if (!Number.isInteger(tv) || tv < 0) { te.classList.add("invalid"); } else { te.classList.remove("invalid"); }
+  }
+  $("tolSumLine").innerHTML = bad
+    ? "基准配方或偏差存在非法数值（均须为非负整数）。"
+    : (sum === TOTAL ? `基准配方总重：<b>${sum}</b> 克 ✓`
+      : `基准配方总重：<b class="bad">${sum}</b> 克（须等于 ${TOTAL}）`);
+}
+
+function hideTolPanels() {
+  for (const id of ["panelTolPass", "panelTolFail", "panelTolPending", "panelTolInvalid"])
+    $(id).style.display = "none";
+}
+function showTolPanel(id) { hideTolPanels(); $(id).style.display = "block"; }
+
+function pct(x) { return (x * 100).toFixed(2) + "%"; }
+
+function tolRows(per) {
+  return per.map(p => {
+    const delta = p.delta === 0 ? "—" :
+      `<span class="${p.delta > 0 ? "delta-pos" : "delta-neg"}">${p.delta > 0 ? "+" : ""}${p.delta}</span>`;
+    const tag = p.locked ? ' <span class="locked-tag">(锁定)</span>' : "";
+    const rng = p.locked ? `${p.base}（锁定）` : `[${p.lower}, ${p.upper}]`;
+    return `<tr><td>${p.name}${tag}</td><td>${p.base}</td><td><b>${p.worst}</b></td>` +
+           `<td>${delta}</td><td>${rng}</td></tr>`;
+  }).join("");
+}
+
+async function toleranceCheck() {
+  const my = ++tolEpoch;
+  if (tolInflight) tolInflight.abort();
+  tolInflight = new AbortController();
+  const signal = tolInflight.signal;
+  hideTolPanels();
+  $("tolStatus").innerHTML = '<span class="spin"></span>核查中…（期间可继续修改，修改将作废旧结论）';
+  $("tolBtn").disabled = true;
+  let data;
+  try {
+    const resp = await fetch("/api/tolerance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(readTolForm()),
+      signal,
+    });
+    data = await resp.json();
+  } catch (e) {
+    if (my !== tolEpoch) return;
+    $("tolBtn").disabled = false;
+    if (e.name === "AbortError") return;
+    $("tolStatus").textContent = "请求失败：" + e.message;
+    return;
+  }
+  $("tolBtn").disabled = false;
+  if (my !== tolEpoch) return;         // 迟到结果：丢弃，不恢复
+  renderTolResult(data);
+}
+
+function renderTolResult(d) {
+  if (d.status === "pass") {
+    $("tolPassMin").textContent = pct(d.min_probability);
+    $("tolPassBase").textContent = pct(d.base_probability);
+    $("tolPassSize").textContent = d.region_size;
+    $("tolPassMs").textContent = d.solve_ms;
+    $("tolPassOpt").textContent = d.optimality;
+    $("tolPassRows").innerHTML = tolRows(d.per_ingredient);
+    showTolPanel("panelTolPass");
+    $("tolStatus").textContent = "核查完成：最差概率已证明 ≥ 0.7，可放行。";
+  } else if (d.status === "fail") {
+    $("tolFailReason").textContent = d.reason;
+    $("tolFailMin").textContent = pct(d.min_probability);
+    $("tolFailBase").textContent = pct(d.base_probability);
+    $("tolFailSize").textContent = d.region_size;
+    $("tolFailMs").textContent = d.solve_ms;
+    $("tolFailOpt").textContent = d.optimality;
+    $("tolFailRows").innerHTML = tolRows(d.per_ingredient);
+    showTolPanel("panelTolFail");
+    $("tolStatus").textContent = "核查完成：容差域内已证实存在不合格反例，不可放行。";
+  } else if (d.status === "pending") {
+    $("tolPendingReason").textContent = d.reason;
+    showTolPanel("panelTolPending");
+    $("tolStatus").textContent = "核查未能判定，结论保持待判。";
+  } else if (d.status === "invalid") {
+    $("tolInvalidReason").textContent = d.reason;
+    showTolPanel("panelTolInvalid");
+    $("tolStatus").textContent = "请修正输入后重试。";
+  } else {
+    $("tolPendingReason").textContent = d.reason || "未知核查错误";
+    showTolPanel("panelTolPending");
+    $("tolStatus").textContent = "核查失败，结论保持待判。";
+  }
+}
+
 async function boot() {
   buildGrid();
+  buildTolGrid();
   const [meta, smp] = await Promise.all([
     fetch("/api/meta").then(r => r.json()),
     fetch("/api/samples").then(r => r.json()),
@@ -249,13 +493,27 @@ async function boot() {
   samples = smp;
   featureNames = meta.feature_names;
   buildGrid();
+  buildTolGrid();
   $("metaLine").textContent =
     `质检模型：随机森林 ${meta.n_trees} 棵树 / 深度 ≤ ${meta.max_depth}（实际深度 ${meta.tree_depths.join(",")}），` +
     `固定种子 ${meta.train_seed} 训练；合格阈值 概率 ≥ ${meta.proba_threshold}；总重 ${meta.total_grams} 克。`;
   fillForm(samples.feasible);
+  fillTolForm(samples.tolerance_pass);
   $("solveBtn").onclick = solve;
   $("feasibleBtn").onclick = () => fillForm(samples.feasible);
   $("infeasibleBtn").onclick = () => fillForm(samples.infeasible);
+  $("tolBtn").onclick = toleranceCheck;
+  $("tolPassBtn").onclick = () => fillTolForm(samples.tolerance_pass);
+  $("tolFailBtn").onclick = () => fillTolForm(samples.tolerance_fail);
+  // 标签页切换：两个工具各自独立，切换不撤下彼此的结论
+  $("tabSolve").onclick = () => {
+    $("tabSolve").classList.add("active"); $("tabTol").classList.remove("active");
+    $("viewSolve").classList.add("active"); $("viewTol").classList.remove("active");
+  };
+  $("tabTol").onclick = () => {
+    $("tabTol").classList.add("active"); $("tabSolve").classList.remove("active");
+    $("viewTol").classList.add("active"); $("viewSolve").classList.remove("active");
+  };
 }
 boot().catch(e => { $("status").textContent = "初始化失败：" + e.message; });
 </script>

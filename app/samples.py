@@ -3,6 +3,12 @@ from __future__ import annotations
 
 from .model import FEATURE_NAMES, predict_proba_qualified
 from .solver import INFEASIBLE, OK, SolveInput, solve
+from .tolerance import (
+    TOL_FAIL,
+    TOL_PASS,
+    ToleranceInput,
+    tolerance_check,
+)
 
 # 可行样例候选：原配方不合格，但不难通过少量改动达标
 _FEASIBLE_CANDIDATES = [
@@ -39,10 +45,51 @@ def _try_candidates(forest, clf, candidates, want_status):
     return None
 
 
+# 容差核查——放行样例候选：容差盒内最低点仍 ≥ 0.7（含一个锁定项）
+_TOL_PASS_CANDIDATES = [
+    # (基准配方, 各料允许偏差, 锁定)
+    ([700, 100, 100, 100], [30, 30, 30, 30], [False, True, False, False]),
+    ([600, 200, 120, 80], [20, 20, 20, 20], [False, False, False, False]),
+    ([700, 100, 100, 100], [10, 10, 10, 10], [False, False, False, False]),
+]
+
+# 容差核查——不合格反例候选：基准尚可，但称量误差可达概率 < 0.7 的区域
+_TOL_FAIL_CANDIDATES = [
+    ([400, 300, 200, 100], [40, 40, 40, 40], [False, False, False, False]),
+    ([400, 300, 200, 100], [15, 15, 15, 15], [False, False, False, False]),
+    ([450, 300, 150, 100], [60, 60, 60, 60], [False, False, False, False]),
+]
+
+
+def _try_tolerance(forest, clf, candidates, want_status):
+    for base, tol, locked in candidates:
+        inp = ToleranceInput(base=list(base), tolerance=list(tol), locked=list(locked))
+        res = tolerance_check(forest, clf, inp)
+        if res.status == want_status:
+            return {
+                "base": list(base),
+                "tolerance": list(tol),
+                "locked": list(locked),
+                "base_probability": predict_proba_qualified(clf, list(base)),
+                "check": res.to_dict(),
+            }
+    return None
+
+
 def build_samples(forest, clf) -> dict:
-    """返回 {"feasible": ..., "infeasible": ...}，均经求解器实测。"""
+    """返回试配与容差核查的实测样例，均经真实模型 + 求解器验证。"""
     feasible = _try_candidates(forest, clf, _FEASIBLE_CANDIDATES, OK)
     infeasible = _try_candidates(forest, clf, _INFEASIBLE_CANDIDATES, INFEASIBLE)
     if feasible is None or infeasible is None:
         raise RuntimeError("样例生成失败：候选样例未通过求解器验证")
-    return {"feasible": feasible, "infeasible": infeasible, "feature_names": FEATURE_NAMES}
+    tol_pass = _try_tolerance(forest, clf, _TOL_PASS_CANDIDATES, TOL_PASS)
+    tol_fail = _try_tolerance(forest, clf, _TOL_FAIL_CANDIDATES, TOL_FAIL)
+    if tol_pass is None or tol_fail is None:
+        raise RuntimeError("容差样例生成失败：候选样例未通过求解器验证")
+    return {
+        "feasible": feasible,
+        "infeasible": infeasible,
+        "tolerance_pass": tol_pass,
+        "tolerance_fail": tol_fail,
+        "feature_names": FEATURE_NAMES,
+    }

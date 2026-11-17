@@ -13,15 +13,14 @@ from fractions import Fraction
 
 import z3
 
+from .forest_enc import encode_forest_leaves, tree_prob_expr
 from .model import (
     FEATURE_NAMES,
     ForestSpec,
-    Leaf,
     N_FEATURES,
     N_TREES,
     PROBA_THRESHOLD,
     TOTAL_GRAMS,
-    cutoff_left,
     is_qualified,
     predict_proba_qualified,
 )
@@ -107,34 +106,8 @@ def _build_optimize(forest: ForestSpec, inp: SolveInput):
     opt.add(z3.Sum(g) == TOTAL_GRAMS)
 
     # ---- 森林约束：每棵树恰好落在一个叶子，概率和达到阈值 ----
-    tree_probs = []
-    for ti, tree in enumerate(forest.trees):
-        # 该树的父指针表：子节点 id -> (父节点 id, 是否走左分支)
-        parent = {}
-        for pid, pn in enumerate(tree.nodes):
-            if not isinstance(pn, Leaf):
-                parent[pn.left] = (pid, True)
-                parent[pn.right] = (pid, False)
-        leaf_selects = []
-        for nid, node in enumerate(tree.nodes):
-            if not isinstance(node, Leaf):
-                continue
-            # 回溯根到该叶子的路径条件
-            conds = []
-            cur = nid
-            while cur in parent:
-                pid, went_left = parent[cur]
-                pn = tree.nodes[pid]
-                k = cutoff_left(pn.threshold)
-                conds.append(g[pn.feature] <= k if went_left else g[pn.feature] >= k + 1)
-                cur = pid
-            b = z3.Bool(f"t{ti}_leaf{nid}")
-            opt.add(b == z3.And(*conds))
-            leaf_selects.append((b, node.prob1))
-        opt.add(z3.PbEq([(b, 1) for b, _ in leaf_selects], 1))  # 恰好一个叶子生效
-        tree_probs.append(
-            z3.Sum([z3.If(b, z3.Q(p.numerator, p.denominator), 0) for b, p in leaf_selects])
-        )
+    trees_select = encode_forest_leaves(opt, forest, g)
+    tree_probs = [tree_prob_expr(sel) for sel in trees_select]
     # mean(p_t) >= 0.7  <=>  sum(p_t) >= 3.5；留 1e-9 量级容差与复核口径一致
     threshold_sum = Fraction(N_TREES) * Fraction(PROBA_THRESHOLD) - Fraction(1, 10**9)
     opt.add(z3.Sum(tree_probs) >= z3.Q(threshold_sum.numerator, threshold_sum.denominator))
